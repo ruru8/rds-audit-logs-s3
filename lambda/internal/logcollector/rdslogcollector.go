@@ -35,12 +35,30 @@ func (l *LogFile) String() string {
 }
 
 func (l *LogFile) IsRotatedFile() bool {
-	matched, err := regexp.Match(`\.log\.\d+$`, []byte(l.LogFileName))
+	// ログファイルが100MBに達しているかどうかを確認
+	if l.Size > 100000000 {
+		return true
+	}
+	// ログのファイル名のsuffixからログファイルの生成時刻を取得
+	regex := regexp.MustCompile(`audit\.log\.\d{1}\.(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})`)
+	matched := regex.FindStringSubmatch(l.LogFileName)
+
+	if len(matched) < 2 {
+		log.Warnf("Error matching log file: %v", l.LogFileName)
+		return false
+	}
+
+	createdTime, err := time.Parse("2006-01-02-15-04", matched[1])
+
+	// 現在時刻(UTC)より30分以上前に作成されたログファイルは回転は完了している
+	rotatedTime := time.Now().Add(-30 * time.Minute)
+
 	if err != nil {
 		log.Warnf("Error matching log file: %v", err)
 		return false
 	}
-	return matched
+	// ログファイルの作成時刻が回転完了時刻より前であればログファイルは回転済み
+	return createdTime.Before(rotatedTime)
 }
 
 // RdsLogCollectorOld contains handles to the provided LogCollectorOptions + aws.RDS struct
@@ -60,7 +78,7 @@ func NewRdsLogCollector(api rdsiface.RDSAPI, httpClient HTTPClient, region strin
 		region:             region,
 		httpClient:         httpClient,
 		dbType:             dbType,
-		logFile:            "audit/server_audit.log",
+		logFile:            "audit/audit.log",
 		instanceIdentifier: rdsInstanceIdentifier,
 	}
 }
@@ -178,6 +196,8 @@ func (c *RdsLogCollector) setRdsInstanceDBType(instance *rds.DBInstance) error {
 		dbType = "mysql"
 	case "postgres":
 		dbType = "postgres"
+	case "aurora-mysql":
+		dbType = "mysql"
 	default:
 		return fmt.Errorf("unsupported engine %s", engine)
 	}
