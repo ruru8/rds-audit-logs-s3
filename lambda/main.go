@@ -20,11 +20,11 @@ import (
 
 // HandlerConfig holds the configuration for the lambda function
 type HandlerConfig struct {
-	RdsInstanceIdentifier string `envconfig:"RDS_INSTANCE_IDENTIFIER" required:"true" desc:"Identifier of the RDS instance"`
-	S3BucketName          string `envconfig:"S3_BUCKET_NAME" required:"true" desc:"Name of the bucket to write logs to"`
-	DynamoDbTableName     string `envconfig:"DYNAMODB_TABLE_NAME" required:"true" desc:"DynamoDb table name"`
-	AwsRegion             string `envconfig:"AWS_REGION" required:"true" desc:"AWS region"`
-	Debug                 bool   `envconfig:"DEBUG" required:"true" desc:"Enable debug mode."`
+	RdsClusterIdentifier string `envconfig:"RDS_CLUSTER_IDENTIFIER" required:"true" desc:"Identifier of the RDS cluster"`
+	S3BucketName         string `envconfig:"S3_BUCKET_NAME" required:"true" desc:"Name of the bucket to write logs to"`
+	DynamoDbTableName    string `envconfig:"DYNAMODB_TABLE_NAME" required:"true" desc:"DynamoDb table name"`
+	AwsRegion            string `envconfig:"AWS_REGION" required:"true" desc:"AWS region"`
+	Debug                bool   `envconfig:"DEBUG" required:"true" desc:"Enable debug mode."`
 }
 
 type lambdaHandler struct {
@@ -41,7 +41,8 @@ func (lh *lambdaHandler) Handler() error {
 	return nil
 }
 
-func main() {
+// 取得したInstanceごとにCreate
+func HandleRequest() {
 	var c HandlerConfig
 	err := envconfig.Process("", &c)
 	if err != nil {
@@ -58,28 +59,54 @@ func main() {
 	}
 	sess := session.New(sessionConfig)
 
-	// Create & start lambda handler
-	lh := &lambdaHandler{
-		processor: processor.NewProcessor(
-			database.NewDynamoDb(
-				dynamodb.New(sess),
-				c.DynamoDbTableName,
-			),
-			logcollector.NewRdsLogCollector(
-				rds.New(sess),
-				logcollector.NewAWSHttpClient(sess),
-				c.AwsRegion,
-				c.RdsInstanceIdentifier,
-				"mysql",
-			),
-			s3writer.NewS3Writer(
-				s3manager.NewUploader(sess),
-				c.S3BucketName,
-				fmt.Sprintf("%s/%s", c.RdsInstanceIdentifier, "audit-logs"),
-			),
-			parser.NewAuditLogParser(),
-			c.RdsInstanceIdentifier,
-		),
+	// Cluster名からInstance名を取得
+	svc := rds.New(sess)
+	clusterName := c.RdsClusterIdentifier
+	input := &rds.DescribeDBInstancesInput{
+		Filters: []*rds.Filter{
+			{
+				Name:   aws.String("db-cluster-id"),
+				Values: []*string{aws.String(clusterName)},
+			},
+		},
 	}
-	lambda.Start(lh.Handler)
+
+	result, err := svc.DescribeDBInstances(input)
+	if err != nil {
+		log.WithError(err).Fatal("Error get rds Instances")
+	}
+
+	for _, instance := range result.DBInstances {
+		rdsInstanceIdentifier := aws.StringValue(instance.DBInstanceIdentifier)
+		fmt.Println("Instance Name:", rdsInstanceIdentifier)
+
+		lh := &lambdaHandler{
+			processor: processor.NewProcessor(
+				database.NewDynamoDb(
+					dynamodb.New(sess),
+					c.DynamoDbTableName,
+				),
+				logcollector.NewRdsLogCollector(
+					rds.New(sess),
+					logcollector.NewAWSHttpClient(sess),
+					c.AwsRegion,
+					rdsInstanceIdentifier,
+					"mysql",
+				),
+				s3writer.NewS3Writer(
+					s3manager.NewUploader(sess),
+					c.S3BucketName,
+					fmt.Sprintf("%s/%s", rdsInstanceIdentifier, "audit-logs"),
+				),
+				parser.NewAuditLogParser(),
+				rdsInstanceIdentifier,
+			),
+		}
+		lh.Handler()
+	}
+}
+
+// start HandleRequest
+func main() {
+	lambda.Start(HandleRequest)
 }
